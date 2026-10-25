@@ -12,6 +12,20 @@ public enum BleState: Int {
     case poweredOn
 }
 
+/// A CoreBluetooth peripheral recovered by its stable identifier together with
+/// the SDK session that owns it. This is intentionally separate from scanning.
+public struct BleKnownPeripheralSession {
+    public let session: BleDeviceSession
+    public let peripheralState: CBPeripheralState
+    public let sdkSessionCreated: Bool
+
+    public init(session: BleDeviceSession, peripheralState: CBPeripheralState, sdkSessionCreated: Bool) {
+        self.session = session
+        self.peripheralState = peripheralState
+        self.sdkSessionCreated = sdkSessionCreated
+    }
+}
+
 /// Ble central api
 public protocol BleDeviceListener {
 
@@ -41,6 +55,10 @@ public protocol BleDeviceListener {
     ///   - fetchKnownDevices: if true, also emit already known sessions
     /// - Returns: AnyPublisher emitting device advertisements
     func search(_ uuids: [CBUUID]?, identifiers: [UUID]?, fetchKnownDevices: Bool) -> AnyPublisher<BleDeviceSession, Error>
+
+    /// Recover one exact peripheral already known to CoreBluetooth without
+    /// depending on an advertisement being surfaced by the scanner.
+    func retrieveKnownSession(_ identifier: UUID) -> AnyPublisher<BleKnownPeripheralSession?, Error>
 
     /// Start connection request for device.
     func openSessionDirect(_ session: BleDeviceSession)

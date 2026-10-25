@@ -440,6 +440,42 @@ extension CBDeviceListenerImpl: BleDeviceListener {
             }
             .eraseToAnyPublisher()
     }
+
+    public func retrieveKnownSession(_ identifier: UUID) -> AnyPublisher<BleKnownPeripheralSession?, Error> {
+        return monitorBleState()
+            .filter { $0 == .poweredOn }
+            .prefix(1)
+            .map { _ -> BleKnownPeripheralSession? in
+                let peripherals = self.manager.retrievePeripherals(withIdentifiers: [identifier])
+                guard peripherals.count == 1, let peripheral = peripherals.first else {
+                    return nil
+                }
+
+                let created = self.session(peripheral) == nil
+                if created {
+                    var advertisementData = [String: Any]()
+                    if let name = peripheral.name {
+                        advertisementData[CBAdvertisementDataLocalNameKey] = name
+                    }
+                    self.centralManager(
+                        self.manager,
+                        didDiscover: peripheral,
+                        advertisementData: advertisementData,
+                        rssi: -20
+                    )
+                }
+
+                guard let session = self.session(peripheral), session.address == identifier else {
+                    return nil
+                }
+                return BleKnownPeripheralSession(
+                    session: session,
+                    peripheralState: peripheral.state,
+                    sdkSessionCreated: created
+                )
+            }
+            .eraseToAnyPublisher()
+    }
     
     public func openSessionDirect(_ session: BleDeviceSession){
         if self.blePowered() {

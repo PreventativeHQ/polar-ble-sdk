@@ -117,6 +117,56 @@ public enum PolarActivityDataType: String, CaseIterable {
 ///     - hasSAGRFCFileSystem = true, device has wider range of settings and user actions available.
 public typealias PolarDeviceInfo = (deviceId: String, address: UUID, rssi: Int, name: String, connectable: Bool, hasSAGRFCFileSystem: Bool)
 
+/// Diagnostic stages emitted by the explicit known-peripheral connection
+/// route. These do not replace or synthesize normal SDK connection callbacks.
+public enum PolarKnownPeripheralConnectionEventKind: String {
+    case directAttemptStarted
+    case knownPeripheralRetrieved
+    case knownPeripheralUnavailable
+    case sdkSessionCreatedOrRecovered
+    case openSessionDirectRequested
+    case existingSessionAlreadyActive
+    case identityMismatch
+    case scanFallbackStarted
+    case directConnectionFailed
+}
+
+/// Evidence from the known-peripheral route before the normal SDK connection
+/// state machine emits deviceConnecting/deviceConnected.
+public struct PolarKnownPeripheralConnectionEvent {
+    public let kind: PolarKnownPeripheralConnectionEventKind
+    public let expectedDeviceIdentifier: String
+    public let requestedPeripheralIdentifier: UUID
+    public let retrievedPeripheralIdentifier: UUID?
+    public let retrievedDeviceIdentifier: String?
+    public let retrievedPeripheralState: String?
+    public let sdkSessionState: String?
+    public let sdkSessionCreated: Bool?
+    public let errorDescription: String?
+
+    public init(
+        kind: PolarKnownPeripheralConnectionEventKind,
+        expectedDeviceIdentifier: String,
+        requestedPeripheralIdentifier: UUID,
+        retrievedPeripheralIdentifier: UUID? = nil,
+        retrievedDeviceIdentifier: String? = nil,
+        retrievedPeripheralState: String? = nil,
+        sdkSessionState: String? = nil,
+        sdkSessionCreated: Bool? = nil,
+        errorDescription: String? = nil
+    ) {
+        self.kind = kind
+        self.expectedDeviceIdentifier = expectedDeviceIdentifier
+        self.requestedPeripheralIdentifier = requestedPeripheralIdentifier
+        self.retrievedPeripheralIdentifier = retrievedPeripheralIdentifier
+        self.retrievedDeviceIdentifier = retrievedDeviceIdentifier
+        self.retrievedPeripheralState = retrievedPeripheralState
+        self.sdkSessionState = sdkSessionState
+        self.sdkSessionCreated = sdkSessionCreated
+        self.errorDescription = errorDescription
+    }
+}
+
 /// deviceInfo: see #PolarDeviceInfo ,
 ///
 ///     - hr: in BPM
@@ -264,6 +314,17 @@ public protocol PolarBleApi: PolarOfflineRecordingApi, PolarOnlineStreamingApi, 
     /// - Throws: InvalidArgument if identifier is invalid polar device id or invalid uuid
     ///
     func connectToDevice(_ identifier: String) throws
+
+    /// Connect to one exact CoreBluetooth peripheral already mapped to the
+    /// expected Polar device ID. If CoreBluetooth cannot recover the UUID, the
+    /// existing SDK search path is retained as an exact-device fallback.
+    /// Normal deviceConnecting/deviceConnected callbacks still originate only
+    /// from SDK session state transitions.
+    func connectToDevice(
+        _ identifier: String,
+        knownPeripheralIdentifier: UUID,
+        connectionEventHandler: @escaping (PolarKnownPeripheralConnectionEvent) -> Void
+    ) throws
     
     /// Disconnect from the current Polar device.
     ///

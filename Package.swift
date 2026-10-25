@@ -21,5 +21,10 @@ let package = Package(
             exclude: ["iOSCommunications/Info.plist", "PolarBleSdk/Info.plist"],
             resources: [.process("iOSCommunications/Resources")]
         ),
+        .testTarget(
+            name: "PolarKnownPeripheralConnectionTests",
+            dependencies: ["PolarBleSdk"],
+            path: "sources/iOS/ios-communications/Tests/PolarKnownPeripheralConnectionTests"
+        ),
     ]
 )

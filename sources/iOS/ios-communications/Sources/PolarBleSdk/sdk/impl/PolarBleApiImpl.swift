@@ -9,6 +9,106 @@ import os
 import UIKit
 #endif
 
+enum PolarKnownPeripheralConnectionRouteOutcome: Equatable {
+    case fallbackStarted
+    case identityRejected
+    case existingSessionAlreadyActive
+    case directOpenRequested
+}
+
+struct PolarKnownPeripheralConnectionRouter {
+    static func route(
+        retrieved: BleKnownPeripheralSession?,
+        expectedDeviceIdentifier: String,
+        requestedPeripheralIdentifier: UUID,
+        emit: (PolarKnownPeripheralConnectionEvent) -> Void,
+        openDirect: (BleDeviceSession) -> Void,
+        startFallback: () -> Void
+    ) -> PolarKnownPeripheralConnectionRouteOutcome {
+        guard let retrieved else {
+            emit(PolarKnownPeripheralConnectionEvent(
+                kind: .knownPeripheralUnavailable,
+                expectedDeviceIdentifier: expectedDeviceIdentifier,
+                requestedPeripheralIdentifier: requestedPeripheralIdentifier
+            ))
+            emit(PolarKnownPeripheralConnectionEvent(
+                kind: .scanFallbackStarted,
+                expectedDeviceIdentifier: expectedDeviceIdentifier,
+                requestedPeripheralIdentifier: requestedPeripheralIdentifier
+            ))
+            startFallback()
+            return .fallbackStarted
+        }
+
+        let session = retrieved.session
+        let retrievedDeviceIdentifier = session.advertisementContent.polarDeviceIdUntouched
+        emit(PolarKnownPeripheralConnectionEvent(
+            kind: .knownPeripheralRetrieved,
+            expectedDeviceIdentifier: expectedDeviceIdentifier,
+            requestedPeripheralIdentifier: requestedPeripheralIdentifier,
+            retrievedPeripheralIdentifier: session.address,
+            retrievedDeviceIdentifier: retrievedDeviceIdentifier.isEmpty ? nil : retrievedDeviceIdentifier,
+            retrievedPeripheralState: String(describing: retrieved.peripheralState),
+            sdkSessionState: session.state.description(),
+            sdkSessionCreated: retrieved.sdkSessionCreated
+        ))
+
+        guard session.address == requestedPeripheralIdentifier,
+              retrievedDeviceIdentifier.isEmpty ||
+                retrievedDeviceIdentifier.caseInsensitiveCompare(expectedDeviceIdentifier) == .orderedSame else {
+            emit(PolarKnownPeripheralConnectionEvent(
+                kind: .identityMismatch,
+                expectedDeviceIdentifier: expectedDeviceIdentifier,
+                requestedPeripheralIdentifier: requestedPeripheralIdentifier,
+                retrievedPeripheralIdentifier: session.address,
+                retrievedDeviceIdentifier: retrievedDeviceIdentifier.isEmpty ? nil : retrievedDeviceIdentifier,
+                retrievedPeripheralState: String(describing: retrieved.peripheralState),
+                sdkSessionState: session.state.description(),
+                sdkSessionCreated: retrieved.sdkSessionCreated
+            ))
+            return .identityRejected
+        }
+
+        emit(PolarKnownPeripheralConnectionEvent(
+            kind: .sdkSessionCreatedOrRecovered,
+            expectedDeviceIdentifier: expectedDeviceIdentifier,
+            requestedPeripheralIdentifier: requestedPeripheralIdentifier,
+            retrievedPeripheralIdentifier: session.address,
+            retrievedDeviceIdentifier: retrievedDeviceIdentifier.isEmpty ? nil : retrievedDeviceIdentifier,
+            retrievedPeripheralState: String(describing: retrieved.peripheralState),
+            sdkSessionState: session.state.description(),
+            sdkSessionCreated: retrieved.sdkSessionCreated
+        ))
+
+        if session.state == .sessionOpen || session.state == .sessionOpening {
+            emit(PolarKnownPeripheralConnectionEvent(
+                kind: .existingSessionAlreadyActive,
+                expectedDeviceIdentifier: expectedDeviceIdentifier,
+                requestedPeripheralIdentifier: requestedPeripheralIdentifier,
+                retrievedPeripheralIdentifier: session.address,
+                retrievedDeviceIdentifier: retrievedDeviceIdentifier.isEmpty ? nil : retrievedDeviceIdentifier,
+                retrievedPeripheralState: String(describing: retrieved.peripheralState),
+                sdkSessionState: session.state.description(),
+                sdkSessionCreated: retrieved.sdkSessionCreated
+            ))
+            return .existingSessionAlreadyActive
+        }
+
+        emit(PolarKnownPeripheralConnectionEvent(
+            kind: .openSessionDirectRequested,
+            expectedDeviceIdentifier: expectedDeviceIdentifier,
+            requestedPeripheralIdentifier: requestedPeripheralIdentifier,
+            retrievedPeripheralIdentifier: session.address,
+            retrievedDeviceIdentifier: retrievedDeviceIdentifier.isEmpty ? nil : retrievedDeviceIdentifier,
+            retrievedPeripheralState: String(describing: retrieved.peripheralState),
+            sdkSessionState: session.state.description(),
+            sdkSessionCreated: retrieved.sdkSessionCreated
+        ))
+        openDirect(session)
+        return .directOpenRequested
+    }
+}
+
 /// Default implementation
 @objc class PolarBleApiImpl: NSObject,
                              BleDeviceSessionStateObserver,
@@ -1018,6 +1118,67 @@ extension PolarBleApiImpl: PolarBleApi  {
                 } catch {
                     self.logMessage("\(error)")
                 }
+            }
+        }
+    }
+
+    func connectToDevice(
+        _ identifier: String,
+        knownPeripheralIdentifier: UUID,
+        connectionEventHandler: @escaping (PolarKnownPeripheralConnectionEvent) -> Void
+    ) throws {
+        // Validate the expected Polar identifier using the same rules as the
+        // existing API before scheduling any CoreBluetooth work.
+        _ = try serviceClientUtils.fetchSession(identifier)
+        connectSubscriptions[identifier]?.cancel()
+        connectionEventHandler(PolarKnownPeripheralConnectionEvent(
+            kind: .directAttemptStarted,
+            expectedDeviceIdentifier: identifier,
+            requestedPeripheralIdentifier: knownPeripheralIdentifier
+        ))
+
+        connectSubscriptions[identifier] = Task {
+            do {
+                var retrieved: BleKnownPeripheralSession?
+                try await self.listener.retrieveKnownSession(knownPeripheralIdentifier)
+                    .receive(on: self.scheduler)
+                    .asyncForEach { value in
+                        retrieved = value
+                    }
+
+                var fallbackRequested = false
+                _ = PolarKnownPeripheralConnectionRouter.route(
+                    retrieved: retrieved,
+                    expectedDeviceIdentifier: identifier,
+                    requestedPeripheralIdentifier: knownPeripheralIdentifier,
+                    emit: connectionEventHandler,
+                    openDirect: { self.listener.openSessionDirect($0) },
+                    startFallback: { fallbackRequested = true }
+                )
+
+                guard fallbackRequested else { return }
+                try await self.listener.search(self.serviceList, identifiers: nil, fetchKnownDevices: true)
+                    .receive(on: self.scheduler)
+                    .filter { session in
+                        session.address == knownPeripheralIdentifier ||
+                            session.advertisementContent.polarDeviceIdUntouched.caseInsensitiveCompare(identifier) == .orderedSame
+                    }
+                    .prefix(1)
+                    .asyncForEach { session in
+#if os(watchOS)
+                        session.connectionType = .directConnection
+#endif
+                        self.listener.openSessionDirect(session)
+                    }
+                self.logMessage("known-peripheral fallback search complete for \(identifier)")
+            } catch {
+                connectionEventHandler(PolarKnownPeripheralConnectionEvent(
+                    kind: .directConnectionFailed,
+                    expectedDeviceIdentifier: identifier,
+                    requestedPeripheralIdentifier: knownPeripheralIdentifier,
+                    errorDescription: error.localizedDescription
+                ))
+                self.logMessage("known-peripheral connection error for \(identifier): \(error)")
             }
         }
     }
@@ -3745,5 +3906,4 @@ private extension String {
         return indices
     }
 }
-
 
